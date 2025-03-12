@@ -1,0 +1,134 @@
+<?php
+
+namespace SuiteCRM\CustomModules\GmailSync;
+
+use Google_Client;
+use Google_Service_PeopleService;
+use Google_Service_PeopleService_Person;
+use Google_Service_PeopleService_PersonPhoneNumbers;
+use Google_Service_PeopleService_PersonEmailAddresses;
+use Google_Service_PeopleService_PersonAddresses;
+use SuiteCRM\Core\Data\Entity\Record;
+use SuiteCRM\Core\Data\Repository\RepositoryFactory;
+
+class GmailSync {
+    private $client;
+    private $service;
+    private $contactRepository;
+
+    public function __construct() {
+        $this->client = new Google_Client();
+        $this->client->setApplicationName('SuiteCRM Gmail Sync');
+        $this->client->setScopes([Google_Service_PeopleService::CONTACTS]);
+        $this->client->setAuthConfig(__DIR__ . '/credentials.json');
+        $this->client->setAccessType('offline');
+        $this->service = new Google_Service_PeopleService($this->client);
+
+        $this->contactRepository = RepositoryFactory::create('Contacts');
+    }
+
+    public function exportContactsToGmail() {
+        $contacts = $this->getSuiteCRMContacts();
+        foreach ($contacts as $contact) {
+            $person = new Google_Service_PeopleService_Person();
+            $person->setNames([['givenName' => $contact['first_name'], 'familyName' => $contact['last_name']]]);
+            $person->setOrganizations([['name' => $contact['company_name'], 'title' => $contact['job_title']]]);
+            $person->setEmailAddresses([['value' => $contact['email']]]);
+            $person->setPhoneNumbers([
+                ['value' => $contact['phone_work'], 'type' => 'work'],
+                ['value' => $contact['phone_mobile'], 'type' => 'mobile']
+            ]);
+            $person->setAddresses([
+                ['streetAddress' => $contact['address'], 'city' => $contact['city'], 'region' => $contact['state'], 'country' => 'Colombia']
+            ]);
+            $person->setUrls([
+                ['value' => $contact['suitecrm_link'], 'type' => 'work']
+            ]);
+            $this->service->people->createContact($person);
+        }
+    }
+
+    public function importContactsFromGmail() {
+        $connections = $this->service->people_connections->listPeopleConnections('people/me', ['personFields' => 'names,organizations,emailAddresses,phoneNumbers,addresses,urls']);
+        foreach ($connections->getConnections() as $connection) {
+            $name = $connection->getNames()[0]['givenName'] ?? '';
+            $lastName = $connection->getNames()[0]['familyName'] ?? '';
+            $company = $connection->getOrganizations()[0]['name'] ?? '';
+            $jobTitle = $connection->getOrganizations()[0]['title'] ?? '';
+            $email = $connection->getEmailAddresses()[0]['value'] ?? '';
+            $phoneWork = $connection->getPhoneNumbers()[0]['value'] ?? '';
+            $phoneMobile = $connection->getPhoneNumbers()[1]['value'] ?? '';
+            $address = $connection->getAddresses()[0]['streetAddress'] ?? '';
+            $city = $connection->getAddresses()[0]['city'] ?? '';
+            $state = $connection->getAddresses()[0]['region'] ?? '';
+            $suitecrmLink = $connection->getUrls()[0]['value'] ?? '';
+            
+            $this->createOrUpdateSuiteCRMContact($name, $lastName, $company, $jobTitle, $email, $phoneWork, $phoneMobile, $address, $city, $state, $suitecrmLink);
+        }
+    }
+
+    private function getSuiteCRMContacts() {
+        $contacts = $this->contactRepository->findAll();
+        $contactList = [];
+        foreach ($contacts as $contact) {
+            $contactList[] = [
+                'first_name' => $contact->get('first_name'),
+                'last_name' => $contact->get('last_name'),
+                'company_name' => $contact->get('account_name'),
+                'job_title' => $contact->get('title'),
+                'email' => $contact->get('email1'),
+                'phone_work' => $contact->get('phone_work'),
+                'phone_mobile' => $contact->get('phone_mobile'),
+                'address' => $contact->get('primary_address_street'),
+                'city' => $contact->get('primary_address_city'),
+                'state' => $contact->get('primary_address_state'),
+                'suitecrm_link' => $contact->get('suitecrm_link')
+            ];
+        }
+        return $contactList;
+    }
+
+    private function createOrUpdateSuiteCRMContact($firstName, $lastName, $company, $jobTitle, $email, $phoneWork, $phoneMobile, $address, $city, $state, $suitecrmLink) {
+        $existingContact = $this->contactRepository->findOneBy(['first_name' => $firstName, 'last_name' => $lastName]);
+        
+        if ($existingContact) {
+            $existingContact->set('account_name', $company);
+            $existingContact->set('title', $jobTitle);
+            $existingContact->set('email1', $email);
+            $existingContact->set('phone_work', $phoneWork);
+            $existingContact->set('phone_mobile', $phoneMobile);
+            $existingContact->set('primary_address_street', $address);
+            $existingContact->set('primary_address_city', $city);
+            $existingContact->set('primary_address_state', $state);
+            $existingContact->set('suitecrm_link', $suitecrmLink);
+            $this->contactRepository->save($existingContact);
+        } else {
+            $newContact = $this->contactRepository->create();
+            $newContact->set('first_name', $firstName);
+            $newContact->set('last_name', $lastName);
+            $newContact->set('account_name', $company);
+            $newContact->set('title', $jobTitle);
+            $newContact->set('email1', $email);
+            $newContact->set('phone_work', $phoneWork);
+            $newContact->set('phone_mobile', $phoneMobile);
+            $newContact->set('primary_address_street', $address);
+            $newContact->set('primary_address_city', $city);
+            $newContact->set('primary_address_state', $state);
+            $newContact->set('suitecrm_link', $suitecrmLink);
+            $this->contactRepository->save($newContact);
+        }
+    }
+}
+
+// Programar sincronización cada 15 minutos
+if (!defined('STDIN')) {
+    exit("Este script debe ejecutarse en CLI.\n");
+}
+while (true) {
+    $sync = new GmailSync();
+    $sync->exportContactsToGmail();
+    $sync->importContactsFromGmail();
+    sleep(900); // Espera 15 minutos
+}
+
+?>
